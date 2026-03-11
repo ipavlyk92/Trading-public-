@@ -92,6 +92,9 @@ if not data.empty:
 
     st.pyplot(fig)
 
+    # Вивід у Streamlit
+    st.pyplot(fig)
+
     # --- СТАТИСТИЧНА ПАНЕЛЬ ---
     col1, col2, col3 = st.columns(3)
     last = final_df.iloc[-1]
