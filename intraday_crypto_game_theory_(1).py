@@ -59,8 +59,11 @@ if not data.empty:
         vwap = (group['Close'] * group['Volume']).cumsum() / group['Volume'].cumsum()
         return vwap
 
-    # Використовуємо transform, щоб уникнути проблем з індексами
-    data['VWAP'] = data.groupby('Date_Only', group_keys=False)['Close'].transform(lambda x: calc_vwap(data.loc[x.index]))
+   # Розрахунок VWAP для кожного дня окремо
+data['Price_Vol'] = data['Close'] * data['Volume']
+grouped = data.groupby('Date_Only')
+data['VWAP'] = grouped['Price_Vol'].cumsum() / grouped['Volume'].cumsum()
+
 
     # Кити та Айсберги
     avg_vol = data['Volume'].rolling(20).mean()
