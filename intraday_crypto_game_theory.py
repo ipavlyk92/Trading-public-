@@ -69,7 +69,8 @@ if remaining_seconds <= 0:
     st.cache_data.clear() # Очищуємо кеш, щоб отримати свіжі дані
     st.rerun()
 
-
+# Візуалізація таймера у верхній панелі
+st.sidebar.markdown(f"### ⏳ Оновлення через: `{remaining_seconds // 60:02d}:{remaining_seconds % 60:02d}`")
 
 st.sidebar.header("Налаштування стратегії")
 
