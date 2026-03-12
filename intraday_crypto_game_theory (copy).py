@@ -14,131 +14,143 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import streamlit as st
+from datetime import datetime, timedelta, timezone
 from streamlit_autorefresh import st_autorefresh
 
-
-# Налаштування сторінки в браузері
+# 1. Налаштування сторінки
 st.set_page_config(page_title="Game Theory Trader", layout="wide")
 
+# --- БЛОК ТАЙМЕРА (СИНХРОНІЗАЦІЯ UTC+2) ---
+kyiv_tz = timezone(timedelta(hours=2))
 
-# Вставляємо автооновлення на початку (300000 мс = 5 хвилини)
-st_autorefresh(interval=300000, key="datarefresh")
+def get_now():
+    return datetime.now(kyiv_tz)
+
+refresh_minutes = 5
+st_autorefresh(interval=1000, key="timer_refresh")
+
+if 'next_update' not in st.session_state:
+    st.session_state.next_update = get_now() + timedelta(minutes=refresh_minutes)
+
+remaining = (st.session_state.next_update - get_now()).total_seconds()
+
+if remaining <= 0:
+    st.cache_data.clear() 
+    st.session_state.next_update = get_now() + timedelta(minutes=refresh_minutes)
+    st.rerun()
+
+st.sidebar.markdown(f"🕒 Поточний час (UTC+2): **{get_now().strftime('%H:%M:%S')}**")
+st.sidebar.markdown(f"### ⏳ Оновлення через: `{int(max(0, remaining))//60:02d}:{int(max(0, remaining))%60:02d}`")
+
+if st.sidebar.button("🔄 Оновити зараз"):
+    st.cache_data.clear()
+    st.session_state.next_update = get_now() + timedelta(minutes=refresh_minutes)
+    st.rerun()
 
 st.title("📊 Інтрадей Термінал: Теорія Ігор")
 st.sidebar.header("Налаштування стратегії")
 
-# --- ЕЛЕМЕНТИ КЕРУВАННЯ ---
 symbol = st.sidebar.selectbox("Оберіть актив", ["BTC-USD", "ETH-USD", "SOL-USD", "AAPL", "NVDA"])
-period = st.sidebar.slider("Період аналізу (дні)", 1, 7, 3)
-window = st.sidebar.number_input("Вікно Z-Score (свічки)", value=288)
+period = st.sidebar.slider("Період аналізу (дні)", 1, 7, 5)
+window = st.sidebar.number_input("Вікно Z-Score (свічки)", value=200)
 whale_sens = st.sidebar.slider("Чутливість до китів", 1.5, 4.0, 2.5)
 
 @st.cache_data(ttl=300)
 def get_data(symbol, period):
     try:
-        # Додаємо auto_adjust=True та примусове скасування MultiIndex
-        data = yf.download(symbol, period=f"{period}d", interval='5m', progress=False, auto_adjust=True)
+        # Завантажуємо дані
+        df = yf.download(symbol, period=f"{period}d", interval='5m', progress=False, auto_adjust=True)
+        if df.empty: return pd.DataFrame()
         
-        if data.empty:
-            return pd.DataFrame()
-
-        # Виправлення структури стовпців (головна причина помилки)
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
+        # Вирівнюємо колонки (MultiIndex fix)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
         
-        # Очищуємо від дублікатів та порожніх значень
-        data = data.loc[:, ~data.columns.duplicated()].dropna()
-        
-        return data
+        # Видаляємо дублікати та очищуємо від критичних NaN
+        df = df.loc[:, ~df.columns.duplicated()]
+        # Важливо: видаляємо лише ті рядки, де немає ціни закриття
+        df = df.dropna(subset=['Close'])
+        return df
     except Exception as e:
         st.error(f"Помилка завантаження: {e}")
         return pd.DataFrame()
 
-
-# Завантаження
 data = get_data(symbol, period)
 
-if not data.empty:
+if not data.empty and len(data) > window:
+    # Копіюємо для розрахунків
+    df_calc = data.copy()
+    df_calc.index = pd.to_datetime(df_calc.index)
+    
     # --- РОЗРАХУНКИ ---
     # Z-Score
-    rolling_mean = data['Close'].rolling(window=window).mean()
-    rolling_std = data['Close'].rolling(window=window).std()
-    data['Z_Score'] = (data['Close'] - rolling_mean) / rolling_std
+    df_calc['Mean'] = df_calc['Close'].rolling(window=int(window)).mean()
+    df_calc['Std'] = df_calc['Close'].rolling(window=int(window)).std()
+    df_calc['Z_Score'] = (df_calc['Close'] - df_calc['Mean']) / df_calc['Std']
 
-    # VWAP
-    data['Date_Only'] = data.index.date
-    data['VWAP'] = data.groupby('Date_Only', group_keys=False).apply(
-        lambda x: (x['Close'] * x['Volume']).cumsum() / x['Volume'].cumsum()
-    )
+    # VWAP (Більш надійний метод розрахунку)
+    df_calc['Date_Only'] = df_calc.index.date
+    def calculate_vwap(df_group):
+        v = df_group['Volume'].values
+        p = df_group['Close'].values
+        return pd.Series((p * v).cumsum() / v.cumsum(), index=df_group.index)
+
+    df_calc['VWAP'] = df_calc.groupby('Date_Only', group_keys=False).apply(calculate_vwap)
 
     # Кити та Айсберги
-    avg_vol = data['Volume'].rolling(20).mean()
-    data['Whale'] = data['Volume'] > (avg_vol * whale_sens)
-    price_change = data['Close'].pct_change().abs()
-    data['Iceberg'] = (price_change < 0.0005) & (data['Volume'] > avg_vol * 1.8)
+    vol_mean = df_calc['Volume'].rolling(20).mean()
+    df_calc['Whale'] = df_calc['Volume'] > (vol_mean * whale_sens)
+    price_pct = df_calc['Close'].pct_change().abs()
+    df_calc['Iceberg'] = (price_pct < 0.0005) & (df_calc['Volume'] > vol_mean * 1.8)
 
-    final_df = data.dropna(subset=['Z_Score', 'VWAP']).copy()
+    # Фільтруємо дані для графіка (видаляємо початкові NaN від rolling)
+    final_df = df_calc.dropna(subset=['Z_Score', 'VWAP']).copy()
 
-    # --- ВІЗУАЛІЗАЦІЯ ---
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
-    plt.subplots_adjust(hspace=0.05)
+    if not final_df.empty:
+        # --- ВІЗУАЛІЗАЦІЯ ---
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), sharex=True)
+        plt.subplots_adjust(hspace=0.1)
 
-    # 1. Ціна
-    ax1.plot(final_df.index, final_df['Close'], label='Ціна', color='#222222', alpha=0.8)
-    ax1.plot(final_df.index, final_df['VWAP'], label='VWAP', color='orange', lw=2)
+        # 1. Ціна та VWAP
+        ax1.plot(final_df.index, final_df['Close'], label='Price (5m)', color='black', alpha=0.6)
+        ax1.plot(final_df.index, final_df['VWAP'], label='Intraday VWAP', color='orange', lw=2)
+        
+        # Сигнали
+        whales = final_df[final_df['Whale']]
+        icebergs = final_df[final_df['Iceberg']]
+        ax1.scatter(whales.index, whales['Close'], color='red', label='Whale', s=60, marker='^', zorder=5)
+        ax1.scatter(icebergs.index, icebergs['Close'], color='blue', label='Iceberg', s=60, marker='s', zorder=5)
+        
+        ax1.legend(loc='upper left')
+        ax1.grid(True, alpha=0.2)
 
-    whales = final_df[final_df['Whale']]
-    icebergs = final_df[final_df['Iceberg']]
-    ax1.scatter(whales.index, whales['Close'], color='red', label='Whale Signal', s=60, marker='^', zorder=5)
-    ax1.scatter(icebergs.index, icebergs['Close'], color='blue', label='Iceberg/Wall', s=60, marker='s', zorder=5)
-    ax1.legend(loc='upper left')
-    ax1.grid(True, alpha=0.2)
+        # 2. Z-Score
+        ax2.plot(final_df.index, final_df['Z_Score'], color='purple', label='Z-Score', lw=1.5)
+        ax2.axhline(2.5, color='red', ls='--', alpha=0.5)
+        ax2.axhline(-2.5, color='green', ls='--', alpha=0.5)
+        ax2.fill_between(final_df.index, 2.5, final_df['Z_Score'], where=(final_df['Z_Score'] > 2.5), color='red', alpha=0.2)
+        ax2.fill_between(final_df.index, -2.5, final_df['Z_Score'], where=(final_df['Z_Score'] < -2.5), color='green', alpha=0.2)
+        
+        ax2.minorticks_on()
+        ax2.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d.%m'))
+        ax2.xaxis.set_minor_locator(mdates.MinuteLocator(interval=30))
+        
+        ax2.grid(visible=True, which='major', color='gray', alpha=0.3)
+        ax2.grid(visible=True, which='minor', color='lightgray', linestyle=':', alpha=0.2)
 
-    # 2. Z-Score
-    ax2.plot(final_df.index, final_df['Z_Score'], color='purple', label='Z-Score', lw=1.5)
-    ax2.axhline(2.5, color='red', ls='--', alpha=0.5)
-    ax2.axhline(-2.5, color='green', ls='--', alpha=0.5)
-    ax2.fill_between(final_df.index, 2.5, final_df['Z_Score'], where=(final_df['Z_Score'] > 2.5), color='red', alpha=0.2)
-    ax2.fill_between(final_df.index, -2.5, final_df['Z_Score'], where=(final_df['Z_Score'] < -2.5), color='green', alpha=0.2)
+        st.pyplot(fig)
 
-    # Налаштування дати
-    ax2.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M (%d-%m)'))
-    plt.xticks(rotation=0)
-
-    # Сітка
-    ax2.grid(True, which='major', color='gray', linestyle='-', alpha=0.4)
-    ax2.grid(True, which='minor', color='gray', linestyle=':', alpha=0.3)
-
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.show()
-
-    # Другорядні мітки (Minor): Кожні 15 хвилин (вертикальні лінії без підписів)
-    ax2.xaxis.set_minor_locator(mdates.MinuteLocator(interval=15))
-    
-    # Вивід у Streamlit
-    st.pyplot(fig)
-
-    # --- СТАТИСТИЧНА ПАНЕЛЬ ---
-    col1, col2, col3 = st.columns(3)
-    last = final_df.iloc[-1]
-
-    with col1:
-        st.metric("Поточна ціна", f"${last['Close']:.2f}")
-    with col2:
-        st.metric("Z-Score (Відхилення)", f"{last['Z_Score']:.2f}")
-    with col3:
-        status = "⚖️ Рівновага"
-        if last['Z_Score'] > 2.5: status = "🔔 ПРОДАЖ (Перегрів)"
-        if last['Z_Score'] < -2.5: status = "🔔 КУПІВЛЯ (Паніка)"
-        st.subheader(status)
-
-    if last['Whale']:
-        st.warning("🐳 Виявлено активність кита на останній свічці!")
-    if last['Iceberg']:
-        st.info("🧊 Виявлено ознаки 'Айсберга' (прихованої стінки)!")
-
+        # ПАНЕЛЬ МЕТРИК
+        col1, col2, col3 = st.columns(3)
+        last_row = final_df.iloc[-1]
+        with col1: st.metric("Ціна", f"${last_row['Close']:.2f}")
+        with col2: st.metric("Z-Score", f"{last_row['Z_Score']:.2f}")
+        with col3:
+            if last_row['Z_Score'] > 2.5: st.error("🔔 ПРОДАЖ")
+            elif last_row['Z_Score'] < -2.5: st.success("🔔 КУПІВЛЯ")
+            else: st.info("⚖️ Рівновага")
+    else:
+        st.warning("Недостатньо обчислених даних. Спробуйте збільшити період або зменшити вікно Z-Score.")
 else:
-    st.error("Не вдалося завантажити дані. Перевірте з'єднання або тікер.")
+    st.error("Дані не завантажились або їх замало для розрахунку (мінімум 200 свічок).")
