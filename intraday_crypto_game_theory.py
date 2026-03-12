@@ -26,6 +26,53 @@ st.set_page_config(page_title="Game Theory Trader", layout="wide")
 st_autorefresh(interval=300000, key="datarefresh")
 
 st.title("📊 Інтрадей Термінал: Теорія Ігор")
+import time
+from datetime import datetime, timedelta
+
+# --- БЛОК АВТООНОВЛЕННЯ ТА ТАЙМЕРА ---
+refresh_minutes = 4
+refresh_seconds = refresh_minutes * 60
+
+# Використовуємо session_state, щоб зберігати час останнього оновлення
+if 'last_refresh' not in st.session_state:
+    st.session_state.last_refresh = datetime.now()
+
+# Контейнер для таймера (щоб він не "стрибав" по сторінці)
+timer_placeholder = st.empty()
+
+# Розрахунок часу до наступного оновлення
+now = datetime.now()
+time_diff = (now - st.session_state.last_refresh).total_seconds()
+remaining = max(0, int(refresh_seconds - time_diff))
+
+if remaining <= 0:
+    st.session_state.last_refresh = datetime.now()
+    st.rerun() # Перезавантаження сторінки
+else:
+    # Відображення красивого таймера
+    timer_placeholder.caption(f"🕒 Наступне оновлення через: **{remaining // 60:02d}:{remaining % 60:02d}**")
+
+from streamlit_autorefresh import st_autorefresh
+
+# 1. Оновлюємо інтерфейс кожну секунду для "цокання" таймера
+st_autorefresh(interval=1000, key="timer_counter")
+
+# 2. Розрахунок залишку часу
+if 'next_refresh_time' not in st.session_state:
+    st.session_state.next_refresh_time = datetime.now() + timedelta(minutes=4)
+
+remaining_delta = st.session_state.next_refresh_time - datetime.now()
+remaining_seconds = int(remaining_delta.total_seconds())
+
+if remaining_seconds <= 0:
+    st.session_state.next_refresh_time = datetime.now() + timedelta(minutes=4)
+    st.cache_data.clear() # Очищуємо кеш, щоб отримати свіжі дані
+    st.rerun()
+
+# Візуалізація таймера у верхній панелі
+st.sidebar.markdown(f"### ⏳ Оновлення через: `{remaining_seconds // 60:02d}:{remaining_seconds % 60:02d}`")
+
+
 st.sidebar.header("Налаштування стратегії")
 
 # --- ЕЛЕМЕНТИ КЕРУВАННЯ ---
