@@ -30,7 +30,7 @@ import time
 from datetime import datetime, timedelta
 
 # --- БЛОК АВТООНОВЛЕННЯ ТА ТАЙМЕРА ---
-refresh_minutes = 4
+refresh_minutes = 5
 refresh_seconds = refresh_minutes * 60
 
 # Використовуємо session_state, щоб зберігати час останнього оновлення
@@ -69,8 +69,6 @@ if remaining_seconds <= 0:
     st.cache_data.clear() # Очищуємо кеш, щоб отримати свіжі дані
     st.rerun()
 
-# Візуалізація таймера у верхній панелі
-st.sidebar.markdown(f"### ⏳ Оновлення через: `{remaining_seconds // 60:02d}:{remaining_seconds % 60:02d}`")
 
 
 st.sidebar.header("Налаштування стратегії")
